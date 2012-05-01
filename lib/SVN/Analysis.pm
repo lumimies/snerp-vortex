@@ -56,7 +56,6 @@ sub reset {
 			seq           INTEGER PRIMARY KEY AUTOINCREMENT,
 			ent_name      TEXT,
 			ent_type      TEXT,
-			is_active     BOOL,
 			is_add        BOOL,
 			is_copy       BOOL,
 			is_modified   BOOL,
@@ -68,17 +67,18 @@ sub reset {
 			rel_path      TEXT,
 			rev_first     INT,
 			rev_last      INT,
+			rev_final     INT,
 			src_path      TEXT,
 			src_rev       INT
 		)
 	") or die $self->dbh()->errstr();
 
 	$self->dbh()->do("
-		CREATE INDEX dir_path_rev_active ON dir (path, rev_first, is_active)
+		CREATE INDEX dir_path_rev_active ON dir (path, rev_first, rev_final)
 	") or die $self->dbh()->errstr();
 
 	$self->dbh()->do("
-		CREATE INDEX dir_path_active ON dir (path, is_active)
+		CREATE INDEX dir_path_active ON dir (path, rev_final)
 	") or die $self->dbh()->errstr();
 
 	$self->dbh()->do("
@@ -145,7 +145,7 @@ sub consider_add {
 	my $sth = $self->dbh()->prepare_cached("
 		INSERT INTO dir (
 			path, rev_first, rev_last, op_first, op_last,
-			is_active, is_add, is_copy, is_modified
+			rev_final, is_add, is_copy, is_modified
 		)
 		VALUES (
 			?, ?, ?, ?, ?,
@@ -154,7 +154,7 @@ sub consider_add {
 	") or die $self->dbh()->errstr();
 
 	warn "INSERT $path r$revision" if $self->verbose();
-	$sth->execute($path, $revision, $revision, "add", "add", 1, 1, 0, 0) or die (
+	$sth->execute($path, $revision, $revision, "add", "add", undef, 1, 0, 0) or die (
 		$sth->errstr()
 	);
 
@@ -206,7 +206,7 @@ sub consider_copy {
 		my $sth = $self->dbh()->prepare_cached("
 			INSERT INTO dir (
 				path, rev_first, rev_last, op_first, op_last,
-				is_active, is_add, is_copy, is_modified,
+				rev_final, is_add, is_copy, is_modified,
 				src_path, src_rev
 			)
 			VALUES (
@@ -220,7 +220,7 @@ sub consider_copy {
 
 		$sth->execute(
 			$relocated_path, $dst_rev, $dst_rev, "copy", "copy",
-			1, $is_add, 1, 0,
+			undef, $is_add, 1, 0,
 			$path_to_copy, $src_rev,
 		) or die $sth->errstr();
 	}
@@ -249,12 +249,12 @@ sub consider_delete {
 		warn "UPDATE $path $revision (is_active=0)" if $self->verbose();
 
 		my $sth = $self->dbh()->prepare_cached("
-			UPDATE dir SET rev_last = ?, op_last = ?, is_active = ?
-			WHERE path = ? and rev_first <= ? and is_active = 1
+			UPDATE dir SET rev_last = ?, op_last = ?, rev_final = ?
+			WHERE path = ? and rev_first <= ? and rev_final is null
 		") or die $self->dbh()->errstr();
 
 		$sth->execute(
-			$revision, "delete", 0,
+			$revision, "delete", $revision,
 			$path_to_delete, $revision,
 		);
 	}
@@ -268,9 +268,9 @@ sub analyze {
 	# Sanity check.  Each path may have at most one active row.
 
 	my $sth = $self->dbh()->prepare_cached("
-		SELECT path, count(is_active) as ct
+		SELECT path, count(1) as ct
 		FROM dir
-		WHERE is_active = 1
+		WHERE rev_final is null
 		GROUP BY path
 		HAVING ct > 1
 	") or die $self->dbh()->errstr();
@@ -289,7 +289,7 @@ sub analyze {
 
 	my $sth_set_final_rev = $self->dbh()->prepare_cached("
 		UPDATE dir SET rev_last = (SELECT max(rev_last) from DIR)
-		WHERE is_active = 1
+		WHERE rev_final is null
 	") or die $self->dbh()->errstr();
 
 	$sth_set_final_rev->execute();
@@ -542,7 +542,7 @@ sub get_tree {
 		my $sth_node = $self->dbh()->prepare_cached("
 			SELECT
 				seq,
-				is_active, is_add, is_copy, src_path, src_rev,
+				is_add, is_copy, src_path, src_rev,
 				ent_type, ent_name, rel_path, path_lop, path_prepend
 			FROM dir
 			WHERE path = ? AND rev_first = ?
@@ -554,7 +554,7 @@ sub get_tree {
 		$sth_node->bind_columns(
 			\my (
 				$seq,
-				$is_active, $is_add, $is_copy, $src_path, $src_rev,
+				$is_add, $is_copy, $src_path, $src_rev,
 				$ent_type, $ent_name, $rel_path, $path_lop, $path_prepend
 			)
 		) or die $sth_node->errstr();
@@ -755,7 +755,7 @@ sub get_dir_info {
 	# TODO - What if multiple rows match?
 	my $sth = $self->dbh()->prepare_cached("
 		SELECT * FROM dir
-		WHERE path = ? AND rev_first <= ? AND rev_last >= ?
+		WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final >= ?)
 		ORDER BY seq DESC
 		LIMIT 1
 	") or die $self->dbh()->errstr();
@@ -797,12 +797,12 @@ sub _touch_directory {
 		my $sth_query = $self->dbh()->prepare_cached("
 			SELECT op_last, rev_first
 			FROM dir
-			WHERE path = ? AND rev_first <= ? AND is_active = 1
+			WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final >= ?)
 			ORDER BY path DESC, rev_first DESC
 			LIMIT 1
 		") or die $self->dbh()->errstr();
 
-		$sth_query->execute($path, $revision) or die(
+		$sth_query->execute($path, $revision, $revision) or die(
 			$sth_query->errstr()
 		);
 
@@ -820,10 +820,10 @@ sub _touch_directory {
 		my $sth_update = $self->dbh()->prepare_cached("
 			UPDATE dir
 			SET op_last = ?, rev_last = ?, is_modified = 1
-			WHERE path = ? AND rev_first = ? AND is_active = 1
+			WHERE path = ? AND rev_first = ? AND (rev_final is null OR rev_final >= ?)
 		") or die $self->dbh()->errstr();
 
-		$sth_update->execute("touch", $revision, $dir_path, $rev_first) or die(
+		$sth_update->execute("touch", $revision, $dir_path, $rev_first, $revision) or die(
 			$sth_update->errstr()
 		);
 	}
@@ -858,11 +858,11 @@ sub _path_exists {
 	my $sth = $self->dbh()->prepare_cached("
 		SELECT count(rev_first) as ct
 		FROM dir
-		WHERE path = ? AND rev_first <= ? AND is_active = 1
+		WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final >= ?)
 		ORDER BY path DESC, rev_first DESC
 	") or die $self->dbh()->errstr();
 
-	$sth->execute($path, $revision) or die $sth->errstr();
+	$sth->execute($path, $revision, $revision) or die $sth->errstr();
 
 	my $exists = 0;
 	$sth->bind_columns(\$exists) or die $sth->errstr();
@@ -880,13 +880,13 @@ sub _get_tree_paths {
 	my $sth = $self->dbh()->prepare_cached("
 		SELECT path, rev_first
 		FROM dir
-		WHERE (path = ? OR path LIKE ?) AND rev_first <= ? AND is_active = 1
-		ORDER BY length(path) DESC, path ASC
+		WHERE (path = ? OR path LIKE ?) AND rev_first <= ? and (rev_final is null OR rev_final >= ?)
+		ORDER BY length(path) ASC, path ASC
 	") or die $self->dbh()->errstr();
 
 	(my $partial_path = $path) =~ s!/*$!/%!;
 
-	$sth->execute($path, $partial_path, $revision) or die $sth->errstr();
+	$sth->execute($path, $partial_path, $revision, $revision) or die $sth->errstr();
 
 	$sth->bind_columns(\my ($found_path, $found_rev)) or die $sth->errstr();
 
