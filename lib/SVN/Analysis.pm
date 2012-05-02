@@ -755,7 +755,7 @@ sub get_dir_info {
 	# TODO - What if multiple rows match?
 	my $sth = $self->dbh()->prepare_cached("
 		SELECT * FROM dir
-		WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final >= ?)
+		WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final > ?)
 		ORDER BY seq DESC
 		LIMIT 1
 	") or die $self->dbh()->errstr();
@@ -797,7 +797,7 @@ sub _touch_directory {
 		my $sth_query = $self->dbh()->prepare_cached("
 			SELECT op_last, rev_first
 			FROM dir
-			WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final >= ?)
+			WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final > ?)
 			ORDER BY path DESC, rev_first DESC
 			LIMIT 1
 		") or die $self->dbh()->errstr();
@@ -820,7 +820,7 @@ sub _touch_directory {
 		my $sth_update = $self->dbh()->prepare_cached("
 			UPDATE dir
 			SET op_last = ?, rev_last = ?, is_modified = 1
-			WHERE path = ? AND rev_first = ? AND (rev_final is null OR rev_final >= ?)
+			WHERE path = ? AND rev_first = ? AND (rev_final is null OR rev_final > ?)
 		") or die $self->dbh()->errstr();
 
 		$sth_update->execute("touch", $revision, $dir_path, $rev_first, $revision) or die(
@@ -858,7 +858,7 @@ sub _path_exists {
 	my $sth = $self->dbh()->prepare_cached("
 		SELECT count(rev_first) as ct
 		FROM dir
-		WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final >= ?)
+		WHERE path = ? AND rev_first <= ? AND (rev_final is null OR rev_final > ?)
 		ORDER BY path DESC, rev_first DESC
 	") or die $self->dbh()->errstr();
 
@@ -880,7 +880,7 @@ sub _get_tree_paths {
 	my $sth = $self->dbh()->prepare_cached("
 		SELECT path, rev_first
 		FROM dir
-		WHERE (path = ? OR path LIKE ?) AND rev_first <= ? and (rev_final is null OR rev_final >= ?)
+		WHERE (path = ? OR path LIKE ?) AND rev_first <= ? and (rev_final is null OR rev_final > ?)
 		ORDER BY length(path) ASC, path ASC
 	") or die $self->dbh()->errstr();
 
